@@ -1,0 +1,71 @@
+---
+title: "Testing LER_WQ functions"
+author: "TBO"
+date: "2025-02-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message = FALSE}
+
+suppressMessages({
+  suppressWarnings({
+
+# Import necessary libraries
+library(tidyverse)
+library(LakeEnsemblR)
+library(rLakeAnalyzer)
+library(glmtools)
+library(gotmtools)
+library(GLM3r)
+library(lubridate)
+library(reshape2)
+library(ncdf4)
+library(yaml)
+library(dplyr)
+library(patchwork)
+library(purrr)
+library(gridExtra)
+library(LakeEnsemblR.WQ)
+
+  })
+})
+
+```
+
+
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+# 
+# Calculating all metrics selected in Output yaml
+
+# setwd('xxxx')
+
+
+
+# The path should include all the files listed below, along with NC files for model outputs. Each model output should be named Output.nc and stored in its respective folder, such as GLM/Output/Output.nc, SELMAPROTBAS/Output/Output.nc, and WET/Output/Output.nc."
+
+#setwd(folder) 
+
+config_file <- "LakeEnsemblR.yaml"
+bathy_file = "Bathymetry.bth"
+metrics_dict <- 'Metrics_dict_v1_add.csv'
+metric_yaml_file = "Output.yaml"
+
+
+# Calculating the metrics selected in Output.yaml
+ext_all<- cal_metrics(metric_yaml_file, folder, metrics_dict, config_file, bathy_file)
+
+# I prefer to save in Rdata for not calculting metrics again and again. Because it takes few minutes!
+
+saveRDS(ext_all, file = "ext_all.Rdata")
+
+
+
+```
+
+
