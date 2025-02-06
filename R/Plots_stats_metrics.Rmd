@@ -1,0 +1,2997 @@
+---
+title: "Testing LER_WQ functions"
+author: "TBO"
+date: "2025-02-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message = FALSE}
+
+suppressMessages({
+  suppressWarnings({
+
+# Import necessary libraries
+library(tidyverse)
+library(LakeEnsemblR)
+library(rLakeAnalyzer)
+library(glmtools)
+library(gotmtools)
+library(GLM3r)
+library(lubridate)
+library(reshape2)
+library(ncdf4)
+library(yaml)
+library(dplyr)
+library(patchwork)
+library(purrr)
+library(gridExtra)
+library(tidyr)
+library(LakeEnsemblR.WQ)
+
+  })
+})
+
+```
+
+
+
+```{r, echo=FALSE, warning=FALSE, message = FALSE}
+
+# Export the calculated metric data 
+ext_all <- readRDS("XXXXXX")
+
+
+
+# Export observed data
+
+
+setwd("XXXX")
+
+Mendota_observed <- read.csv('XXXXX')
+
+Mendota_observed$datetime <- mdy(Mendota_observed$datetime)
+
+Mendota_obs_long <- gather(Mendota_observed, variable, value, temp:ZOO_all, factor_key=TRUE)
+
+# Conversion name of the variables and unit of the variables
+
+var_names_table <- data.frame(variable = c('temp','OXY_oxy','CAR_pH','PHS_frp','NIT_nit','NIT_amm','SIL_rsi','PHY_tchla'),
+new_var_name = c('Temp_degreeCelcius', 'DO_gramsPerCubicMeter','pH', 'PO4_gramsPerCubicMeter', 'NO3_gramsPerCubicMeter', 'NH4_gramsPerCubicMeter', 'Silica_gramsPerCubicMeter', 'Total_Chla_miligramsPerCubicMeter'),
+conversion_factor = c(1, 0.032, 1, 0.03097, 0.014, 0.014, 0.06008, 1))
+
+
+
+
+Mendota_obs_long2 <- Mendota_obs_long %>%
+  left_join(var_names_table, by= 'variable') %>%
+  na.omit() %>%
+  mutate(value = value*conversion_factor) %>%
+  mutate(variable = new_var_name) %>%
+  select(-c(new_var_name, conversion_factor))
+  
+
+var_names <- unique(Mendota_obs_long2$variable)
+
+Obs_list <- list()
+
+for (i in 1:length(var_names)){
+  
+  Obs_var <- Mendota_obs_long2 %>%
+  filter(variable == var_names[i])
+  
+  Obs_var<- Obs_var %>%
+  mutate(depth2 = paste("Depth_", depth, sep = "")) %>%
+  select(-depth)
+  
+  Obs_var_wide <- spread(Obs_var, key = depth2, value = value)
+
+  Obs_var_i <- Obs_var_wide %>%
+  select(-variable)
+  
+  Obs_var_i$datetime<- ymd(Obs_var_i$datetime)
+  Obs_list[[var_names[i]]]<- Obs_var_i
+  
+}
+
+
+
+
+
+
+
+```
+
+
+
+
+## Statistical Measures
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+
+
+# NSE Function
+calculate_nse <- function(observed, predicted) {
+
+  if (length(observed) != length(predicted)) {
+    stop("The observed and predicted vectors does not have equal length.")
+  }
+  
+  # Remove NAs 
+  valid_indices <- which(!is.na(observed) & !is.na(predicted))
+  observed <- observed[valid_indices]
+  predicted <- predicted[valid_indices]
+  
+  NSE <- 1 - (sum((observed - predicted)^2) / sum((observed - mean(observed))^2))
+  
+  return(NSE)
+}
+
+calculate_rmse <- function(observed, predicted) {
+
+  if (length(observed) != length(predicted)) {
+    stop("The observed and predicted vectors does not have equal length.")
+  }
+  
+  # Remove NAs
+  non_na <- which(!is.na(observed) & !is.na(predicted))
+  observed <- observed[non_na]
+  predicted <- predicted[non_na]
+  
+  residual <- observed-predicted
+  RMSE <- sqrt(sum(residual^2)/length(observed))
+
+  
+  return(RMSE)
+}
+
+calculate_nrmse <- function(observed, predicted) {
+
+  if (length(observed) != length(predicted)) {
+    stop("The observed and predicted vectors does not have equal length.")
+  }
+  
+  # Remove NAs
+  non_na <- which(!is.na(observed) & !is.na(predicted))
+  observed <- observed[non_na]
+  predicted <- predicted[non_na]
+  
+  residual <- observed-predicted
+  RMSE <- sqrt(sum(residual^2)/length(observed))
+  NRMSE <- RMSE/(max(observed)- min(observed))
+  
+  return(NRMSE)
+}
+
+calculate_pbias <- function(observed, predicted) {
+  
+  if (length(observed) != length(predicted)) {
+    stop("The observed and predicted vectors does not have equal length.")
+  }
+  
+  # Remove NAs
+  non_na <- which(!is.na(observed) & !is.na(predicted))
+  observed <- observed[non_na]
+  predicted <- predicted[non_na]
+  
+  adjusted_observed <- ifelse(abs(observed) < 1e-3, 1e-3, observed)
+  adjusted_predicted <- ifelse(abs(predicted) < 1e-3, 1e-3, predicted)
+  pbias <- mean((adjusted_observed - adjusted_predicted) / abs(adjusted_observed)) * 100
+  
+  return(pbias)
+
+}
+
+calculate_lnlikelihood <- function(observed, predicted) {
+  
+  if (length(observed) != length(predicted)) {
+    stop("The observed and predicted vectors does not have equal length.")
+  }
+  
+  # Remove NAs
+  non_na <- which(!is.na(observed) & !is.na(predicted))
+  observed <- observed[non_na]
+  predicted <- predicted[non_na]
+  
+  return(sum(dnorm(observed, mean = predicted, log = TRUE)))
+
+}
+
+
+
+
+cal_stats <- function(observed, predicted) {
+  
+NSE<- calculate_nse (observed, predicted)
+RMSE <- calculate_rmse (observed, predicted)
+NRMSE<-  calculate_nrmse (observed, predicted)
+PBIAS <-   calculate_pbias (observed, predicted)
+lnlikelihood<- calculate_lnlikelihood (observed, predicted)
+KGE <- hydroGOF::KGE(observed, predicted)
+residual <- observed-predicted
+  return(list(residual =residual, NSE = NSE, RMSE = RMSE, NRMSE = NRMSE, PBIAS =PBIAS, lnlikelihood = lnlikelihood, KGE = KGE))
+
+}
+
+
+
+
+```
+
+### Temperature Observed data versus modeled data
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+
+
+# Compare Temp with Observed
+
+Modeled_temp <- ext_all[["Temp_degreeCelcius"]]
+
+
+# Compare DO
+Modeled_do <- ext_all[["DO_gramsPerCubicMeter"]]
+ 
+
+
+# Function to create the data for each depth and plot
+compare_plot <- function(temp_glm, temp_wet, temp_selma, temp_obs, depth, y_title) {
+  
+  # Select the relevant depth column dynamically
+  GLM_data <- temp_glm %>%
+    select(datetime, !!sym(paste0("Depth_", depth))) %>%
+    rename(Value = !!sym(paste0("Depth_", depth))) %>%
+    mutate(Model = "GLM")
+  
+  WET_data <- temp_wet %>%
+    select(datetime, !!sym(paste0("Depth_", depth))) %>%
+    rename(Value = !!sym(paste0("Depth_", depth))) %>%
+    mutate(Model = "WET")
+  
+  Selma_data <- temp_selma %>%
+    select(datetime, !!sym(paste0("Depth_", depth))) %>%
+    rename(Value = !!sym(paste0("Depth_", depth))) %>%
+    mutate(Model = "SELMAPROTBAS")
+  
+  Obs_data <- temp_obs %>%
+    select(datetime, !!sym(paste0("Depth_", depth))) %>%
+    rename(Value = !!sym(paste0("Depth_", depth))) %>%
+    mutate(Model = "OBSERVED")
+  
+  # Combine all data
+  Temp_all <- bind_rows(GLM_data, WET_data, Selma_data, Obs_data)
+  
+  
+  # Extract the points for statistics
+  observed_dates <- Temp_all %>%
+  filter(Model == "OBSERVED") %>%
+  pull(datetime) # Extract observed dates
+
+  Temp_all_obsdates <- Temp_all %>%
+  filter(datetime %in% observed_dates)
+
+  
+  Temp_all_obsdates_wide <- spread(Temp_all_obsdates, key = Model, value = Value)
+  
+ stats_glm <-  cal_stats(Temp_all_obsdates_wide$OBSERVED, Temp_all_obsdates_wide$GLM)
+ stats_wet <-  cal_stats(Temp_all_obsdates_wide$OBSERVED, Temp_all_obsdates_wide$WET)
+ stats_selma <-   cal_stats(Temp_all_obsdates_wide$OBSERVED, Temp_all_obsdates_wide$SELMAPROTBAS)
+
+  # Create plot
+  temp_plot <- ggplot(Temp_all, aes(x = datetime, y = Value, color = Model, group = Model)) + 
+    geom_line(data = Temp_all[Temp_all$Model != "OBSERVED",], aes(linetype = Model)) +  # Line plot for GLM, WET, and SELMA
+    geom_point(data = Temp_all[Temp_all$Model == "OBSERVED",], aes(shape = Model), col = "black") +  # Points for observed data
+    labs(title = paste0("Depth: ", depth, " m"), 
+         x = "Date", 
+         y = y_title) +
+    theme(legend.title = element_blank())
+  
+  return(list(temp_plot, stats_glm, stats_wet, stats_selma))
+}
+
+# Define depths to iterate over
+depths_plot <- c(0, 5, 10, 15, 20, 24)
+
+
+depths <- c(0:24)
+
+# Temperature Plot
+
+temp_glm <- Modeled_temp$GLM
+
+temp_wet <- Modeled_temp$WET
+
+temp_selma <- Modeled_temp$SELMAPROTBAS
+
+temp_obs <- Obs_list$Temp_degreeCelcius
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot(temp_glm, temp_wet, temp_selma, temp_obs, depth, "Temperature")
+})
+
+
+# # Combine all plots into one layout and collect the legends
+  temp_combined_plot <- wrap_plots(list(plots[[1]][[1]], plots[[6]][[1]], 
+                                     plots[[11]][[1]],
+                                     plots[[16]][[1]],
+                                     plots[[21]][[1]],
+                                     plots[[25]][[1]]), ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+# 
+# # Display combined plot
+temp_combined_plot
+
+
+
+stats_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    Model = rep(c("GLM", "WET", "SELMAPROTBAS"), each = 6),
+    Metric = rep(c("NSE", "RMSE", "NRMSE", "PBIAS", "lnlikelihood", "KGE"), times = 3),
+    Value = c(glm_stats$NSE, glm_stats$RMSE, glm_stats$NRMSE, glm_stats$PBIAS, glm_stats$lnlikelihood, glm_stats$KGE,
+              wet_stats$NSE, wet_stats$RMSE, wet_stats$NRMSE, wet_stats$PBIAS, wet_stats$lnlikelihood, wet_stats$KGE,
+              selma_stats$NSE, selma_stats$RMSE, selma_stats$NRMSE, selma_stats$PBIAS, selma_stats$lnlikelihood, selma_stats$KGE)
+  )
+}))
+
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+ggplot(stats_models, aes(x = Depth * -1, y = Value, color = Model)) +
+
+ geom_line(aes(group = Model)) +
+
+   geom_point(aes(color = Model), size = 2) +
+
+  facet_wrap(~Metric, scales = "free") +
+
+
+  #scale_y_continuous(position = "right") +
+
+  theme_minimal() +
+  labs(
+    x = "Value",
+    y = "Depth",
+    title = "Statistics"
+  )+
+ coord_flip()
+
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =12, fig.height=12}
+
+
+residual_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    GLM = glm_stats$residual,
+    WET = wet_stats$residual,
+    SELMAPROTBAS = selma_stats$residual
+  )
+}))
+
+residual_models_long <- gather(residual_models, Model, Value, GLM:SELMAPROTBAS, factor_key=TRUE)
+
+residual_models_long$Depth <- as.factor(residual_models_long$Depth)
+
+
+# 
+ggplot(residual_models_long, aes(x=Value, fill=Model)) +
+  facet_wrap(~Depth, scales = "free")+
+  ggtitle("Temperature")+
+
+  geom_density(alpha= 0.4) +
+
+     geom_vline(xintercept = 0,
+             color = "red", linetype = "dashed", size = 1)
+
+```
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=16}
+
+
+library(ggridges)
+residual_models_glm <- residual_models_long %>%
+  filter(Model == "GLM")
+
+residual_models_glm$Depth <- as.factor(residual_models_glm$Depth)
+
+ggplot(residual_models_long, aes(x = Value, y = Depth, col = Model)) +
+  facet_wrap(~Model) +
+geom_density_ridges(linetype = 1, lwd = 0.5, alpha = 0.5) + 
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1) + 
+  ggtitle("Temperature")
+
+
+```
+
+```
+
+# Oxygen Plot
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+
+do_glm <- Modeled_do$GLM
+
+do_wet <- Modeled_do$WET
+
+do_selma <- Modeled_do$SELMAPROTBAS
+
+do_obs <- Obs_list$DO_gramsPerCubicMeter
+
+
+# depths <- c(0, 5, 10, 15, 20, 24)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot(do_glm, do_wet, do_selma, do_obs, depth, "Oxygen")
+})
+
+# # Combine all plots into one layout and collect the legends
+  do_combined_plot <- wrap_plots(list(plots[[1]][[1]], plots[[6]][[1]], 
+                                     plots[[11]][[1]],
+                                     plots[[16]][[1]],
+                                     plots[[21]][[1]],
+                                     plots[[25]][[1]]), ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+# 
+# # Display combined plot
+do_combined_plot
+
+
+
+stats_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    Model = rep(c("GLM", "WET", "SELMAPROTBAS"), each = 6),
+    Metric = rep(c("NSE", "RMSE", "NRMSE", "PBIAS", "lnlikelihood", "KGE"), times = 3),
+    Value = c(glm_stats$NSE, glm_stats$RMSE, glm_stats$NRMSE, glm_stats$PBIAS, glm_stats$lnlikelihood, glm_stats$KGE,
+              wet_stats$NSE, wet_stats$RMSE, wet_stats$NRMSE, wet_stats$PBIAS, wet_stats$lnlikelihood, wet_stats$KGE,
+              selma_stats$NSE, selma_stats$RMSE, selma_stats$NRMSE, selma_stats$PBIAS, selma_stats$lnlikelihood, selma_stats$KGE)
+  )
+}))
+
+
+```
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+ggplot(stats_models, aes(x = Depth * -1, y = Value, color = Model)) +
+
+ geom_line(aes(group = Model)) +
+
+   geom_point(aes(color = Model), size = 2) +
+
+  facet_wrap(~Metric, scales = "free") +
+
+
+  #scale_y_continuous(position = "right") +
+
+  theme_minimal() +
+  labs(
+    x = "Value",
+    y = "Depth",
+    title = "DO Statistics"
+  )+
+ coord_flip()
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =12, fig.height=12}
+
+
+
+residual_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    GLM = glm_stats$residual,
+    WET = wet_stats$residual,
+    SELMAPROTBAS = selma_stats$residual
+  )
+}))
+
+residual_models_long <- gather(residual_models, Model, Value, GLM:SELMAPROTBAS, factor_key=TRUE)
+
+ggplot(residual_models_long, aes(x=Value, fill=Model)) +
+  facet_wrap(~Depth, scales = "free")+
+  ggtitle("DO")+
+
+  geom_density(alpha= 0.4) +
+ geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1)
+  
+```
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=12}
+
+residual_models_long$Depth <- as.factor(residual_models_long$Depth)
+
+ggplot(residual_models_long, aes(x = Value, y = Depth, col = Model)) +
+  facet_wrap(~Model) +
+geom_density_ridges(linetype = 1, lwd = 0.5, alpha = 0.5) + 
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1) + 
+  ggtitle("Oxygen") + xlim(c(-10,10))
+
+
+
+```
+
+# PO4
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+
+# PO4
+
+# Compare PO4
+Modeled_po4 <- ext_all[["PO4_gramsPerCubicMeter"]]
+
+po4_glm <- Modeled_po4$GLM
+
+po4_wet <- Modeled_po4$WET
+
+po4_selma <- Modeled_po4$SELMAPROTBAS
+
+po4_obs <- Obs_list$PO4_gramsPerCubicMeter
+
+
+depths <- c(0, 4, 10, 20)
+
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot(po4_glm, po4_wet, po4_selma, po4_obs, depth, "PO4")
+})
+
+# # Combine all plots into one layout and collect the legends
+  po4_combined_plot <- wrap_plots(list(plots[[1]][[1]],
+                                       plots[[2]][[1]],
+                                       plots[[3]][[1]],
+                                       plots[[4]][[1]]), ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+# 
+# # Display combined plot
+po4_combined_plot
+
+
+```
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+stats_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    Model = rep(c("GLM", "WET", "SELMAPROTBAS"), each = 6),
+    Metric = rep(c("NSE", "RMSE", "NRMSE", "PBIAS", "lnlikelihood", "KGE"), times = 3),
+    Value = c(glm_stats$NSE, glm_stats$RMSE, glm_stats$NRMSE, glm_stats$PBIAS, glm_stats$lnlikelihood, glm_stats$KGE,
+              wet_stats$NSE, wet_stats$RMSE, wet_stats$NRMSE, wet_stats$PBIAS, wet_stats$lnlikelihood, wet_stats$KGE,
+              selma_stats$NSE, selma_stats$RMSE, selma_stats$NRMSE, selma_stats$PBIAS, selma_stats$lnlikelihood, selma_stats$KGE)
+  )
+}))
+
+```
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+ggplot(stats_models, aes(x = Depth * -1, y = Value, color = Model)) +
+
+ geom_line(aes(group = Model)) +
+
+   geom_point(aes(color = Model), size = 2) +
+
+  facet_wrap(~Metric, scales = "free") +
+
+
+  #scale_y_continuous(position = "right") +
+
+  theme_minimal() +
+  labs(
+    x = "Value",
+    y = "Depth",
+    title = "PO4 Statistics"
+  )+
+ coord_flip()
+
+```
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+residual_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    GLM = glm_stats$residual,
+    WET = wet_stats$residual,
+    SELMAPROTBAS = selma_stats$residual
+  )
+}))
+
+residual_models_long <- gather(residual_models, Model, Value, GLM:SELMAPROTBAS, factor_key=TRUE)
+
+ggplot(residual_models_long, aes(x=Value, fill=Model)) +
+  facet_wrap(~Depth, scales = "free")+
+  ggtitle("PO4")+geom_density(alpha= 0.4) + geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1)
+  
+
+
+
+residual_models_long$Depth <- as.factor(residual_models_long$Depth)
+
+ggplot(residual_models_long, aes(x = Value, y = Depth, col = Model)) +
+  facet_wrap(~Model) +
+geom_density_ridges(linetype = 1, lwd = 0.5, alpha = 0.5) + 
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1) + 
+  ggtitle("PO4") + xlim(c(-0.2, 0.5))
+
+
+
+```
+
+# NO3
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+# NO3
+
+Modeled_NO3 <- ext_all[["NO3_gramsPerCubicMeter"]]
+
+NO3_glm <- Modeled_NO3$GLM
+
+NO3_wet <- Modeled_NO3$WET
+
+NO3_selma <- Modeled_NO3$SELMAPROTBAS
+
+NO3_obs <- Obs_list$NO3_gramsPerCubicMeter
+
+
+depths <- c(0, 4, 10, 20)
+
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot(NO3_glm, NO3_wet, NO3_selma, NO3_obs, depth, "NO3")
+})
+
+# Combine all plots into one layout and collect the legends
+NO3_combined_plot <- wrap_plots(list(plots[[1]][[1]],
+                                     plots[[2]][[1]],
+                                     plots[[3]][[1]],
+                                     plots[[4]][[1]]),
+                                ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+NO3_combined_plot
+
+
+
+stats_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    Model = rep(c("GLM", "WET", "SELMAPROTBAS"), each = 6),
+    Metric = rep(c("NSE", "RMSE", "NRMSE", "PBIAS", "lnlikelihood", "KGE"), times = 3),
+    Value = c(glm_stats$NSE, glm_stats$RMSE, glm_stats$NRMSE, glm_stats$PBIAS, glm_stats$lnlikelihood, glm_stats$KGE,
+              wet_stats$NSE, wet_stats$RMSE, wet_stats$NRMSE, wet_stats$PBIAS, wet_stats$lnlikelihood, wet_stats$KGE,
+              selma_stats$NSE, selma_stats$RMSE, selma_stats$NRMSE, selma_stats$PBIAS, selma_stats$lnlikelihood, selma_stats$KGE)
+  )
+}))
+
+
+
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+
+ggplot(stats_models, aes(x = Depth * -1, y = Value, color = Model)) +
+
+ geom_line(aes(group = Model)) +
+
+   geom_point(aes(color = Model), size = 2) +
+
+  facet_wrap(~Metric, scales = "free") +
+
+
+  #scale_y_continuous(position = "right") +
+
+  theme_minimal() +
+  labs(
+    x = "Value",
+    y = "Depth",
+    title = "NO3 Statistics"
+  )+
+ coord_flip()
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+residual_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    GLM = glm_stats$residual,
+    WET = wet_stats$residual,
+    SELMAPROTBAS = selma_stats$residual
+  )
+}))
+
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+
+residual_models_long <- gather(residual_models, Model, Value, GLM:SELMAPROTBAS, factor_key=TRUE)
+
+ggplot(residual_models_long, aes(x=Value, fill=Model)) +
+  facet_wrap(~Depth, scales = "free")+
+  ggtitle("DO")+
+
+  geom_density(alpha= 0.4) +
+  
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1)
+  
+
+
+
+residual_models_long$Depth <- as.factor(residual_models_long$Depth)
+
+ggplot(residual_models_long, aes(x = Value, y = Depth, col = Model)) +
+  facet_wrap(~Model) +
+geom_density_ridges(linetype = 1, lwd = 0.5, alpha = 0.5) + 
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1) + 
+  ggtitle("NO3") 
+
+
+
+
+
+```
+
+# NH4
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+
+Modeled_NH4 <- ext_all[["NH4_gramsPerCubicMeter"]]
+
+NH4_glm <- Modeled_NH4$GLM
+
+NH4_wet <- Modeled_NH4$WET
+
+NH4_selma <- Modeled_NH4$SELMAPROTBAS
+
+NH4_obs <- Obs_list$NH4_gramsPerCubicMeter
+
+
+depths <- c(0, 4, 10, 20)
+
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot(NH4_glm, NH4_wet, NH4_selma, NH4_obs, depth, "NH4")
+})
+# Combine all plots into one layout and collect the legends
+NH4_combined_plot <- wrap_plots(list(plots[[1]][[1]],
+                                     plots[[2]][[1]],
+                                     plots[[3]][[1]],
+                                     plots[[4]][[1]]),
+                                ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+NH4_combined_plot
+
+```
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+stats_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    Model = rep(c("GLM", "WET", "SELMAPROTBAS"), each = 6),
+    Metric = rep(c("NSE", "RMSE", "NRMSE", "PBIAS", "lnlikelihood", "KGE"), times = 3),
+    Value = c(glm_stats$NSE, glm_stats$RMSE, glm_stats$NRMSE, glm_stats$PBIAS, glm_stats$lnlikelihood, glm_stats$KGE,
+              wet_stats$NSE, wet_stats$RMSE, wet_stats$NRMSE, wet_stats$PBIAS, wet_stats$lnlikelihood, wet_stats$KGE,
+              selma_stats$NSE, selma_stats$RMSE, selma_stats$NRMSE, selma_stats$PBIAS, selma_stats$lnlikelihood, selma_stats$KGE)
+  )
+}))
+
+
+
+ggplot(stats_models, aes(x = Depth * -1, y = Value, color = Model)) +
+
+ geom_line(aes(group = Model)) +
+
+   geom_point(aes(color = Model), size = 2) +
+
+  facet_wrap(~Metric, scales = "free") +
+
+
+  #scale_y_continuous(position = "right") +
+
+  theme_minimal() +
+  labs(
+    x = "Value",
+    y = "Depth",
+    title = "NH4 Statistics"
+  )+
+ coord_flip()
+
+
+
+residual_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    GLM = glm_stats$residual,
+    WET = wet_stats$residual,
+    SELMAPROTBAS = selma_stats$residual
+  )
+}))
+
+residual_models_long <- gather(residual_models, Model, Value, GLM:SELMAPROTBAS, factor_key=TRUE)
+
+ggplot(residual_models_long, aes(x=Value, fill=Model)) +
+  facet_wrap(~Depth, scales = "free")+
+  ggtitle("NH4")+
+
+  geom_density(alpha= 0.4) +
+  
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1)
+  
+
+
+
+residual_models_long$Depth <- as.factor(residual_models_long$Depth)
+
+ggplot(residual_models_long, aes(x = Value, y = Depth, col = Model)) +
+  facet_wrap(~Model) +
+geom_density_ridges(linetype = 1, lwd = 0.5, alpha = 0.5) + 
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1) + 
+  ggtitle("NH4") 
+
+
+
+
+
+```
+
+
+
+# All N related variables - Water Column Means
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=20}
+ bathy_data <- load.bathy('C:/Users/au721619/OneDrive - Aarhus universitet/Documents/GitHub/LakeEnsemblR.WQ/inst/extdata/example_input_files/Bathymetry.bth')
+ 
+ 
+depth_seq <- seq(0, max(bathy_data$depth), by = 0.1)
+
+ bathy_data_int<- approx(bathy_data$depths, bathy_data$areas, xout=depth_seq, rule=2)
+ 
+bathy_data_int <- data.frame(bathy_data_int$x, bathy_data_int$y)
+colnames(bathy_data_int) <- c('Depth', 'Area')
+ 
+ Modeled_NH4 <- ext_all[["NH4_gramsPerCubicMeter"]]
+
+ Modeled_DO <- ext_all[["DO_gramsPerCubicMeter"]]
+
+ Modeled_Temp <- ext_all[["Temp_degreeCelcius"]]
+
+ NH4_glm <- Modeled_NH4$GLM
+
+ NH4_wet <- Modeled_NH4$WET
+
+ NH4_selma <- Modeled_NH4$SELMAPROTBAS
+ 
+ DO_selma <- Modeled_DO$SELMAPROTBAS
+ 
+ Temp_selma <- Modeled_Temp$SELMAPROTBAS
+ 
+ 
+ # Convert to mmol m3
+
+NH4_selma <- NH4_selma %>%
+  mutate(across(-datetime, ~ . * 1000/14))
+
+
+DO_selma <- DO_selma %>%
+  mutate(across(-datetime, ~ . * 1000/32))
+
+
+nitrif_selma_cal <- function(DO,Temp, NH4){
+nf <- ((DO/(0.01 + DO))* 0.1* exp(0.11* Temp)/86400 )
+nitrification <- nf* NH4 * 0.014
+return(nitrification)
+
+}
+
+
+
+nitrification_selma <- DO_selma["datetime"]
+
+
+
+# Loop through each depth column and calculate nitrification
+for (col in names(DO_selma)[-1]) {
+  nitrification_selma[[col]] <- nitrif_selma_cal(
+    DO = DO_selma[[col]],
+    Temp = Temp_selma[[col]],
+    NH4 = NH4_selma[[col]]
+  )
+}
+
+ 
+ 
+nitrification_selma_long <- nitrification_selma %>%
+        pivot_longer(cols = starts_with("Depth_"), names_to = "Depth", values_to = "Value") %>%
+        mutate(Depth = as.numeric(gsub("Depth_", "", Depth)))
+
+   depth_seq <- seq(0, max(nitrification_selma_long$Depth), by = 0.1)
+      data_interpolated <- nitrification_selma_long %>%
+        group_by(datetime) %>%
+        summarise(Value = list(approx(Depth, Value, xout = depth_seq, rule = 2)$y),
+                  Depth = list(depth_seq)) %>%
+        unnest(c(Depth, Value))
+      
+      # Join with bathymetry data and calculate mass in kg
+      data_interpolated <- data_interpolated %>%
+        left_join(bathy_data_int, by = "Depth") %>%
+        mutate(kg = Value * (Area * 0.1 / 1000)*86400)
+      
+      # Summarize total mass per datetime
+      data_interpolated_avg <- data_interpolated %>%
+        group_by(datetime) %>%
+        summarise(sum_kg = sum(kg, na.rm = TRUE))
+      
+     data_interpolated_avg<-  data_interpolated_avg %>%
+        mutate(Model = "SELMAPROTBAS") 
+ 
+ selma_nitrif_final <- data_interpolated_avg
+ 
+ 
+ 
+ 
+ 
+
+ library(dplyr)
+library(tidyr)
+library(purrr)
+
+cal_sum <- function(data, var_name, bathy_data_int) {
+  models <- c("GLM", "WET", "SELMAPROTBAS")
+  
+  map_dfr(models, function(model) {
+    if (!is.null(data[[model]])) {
+      data_long <- data[[model]] %>%
+        pivot_longer(cols = starts_with("Depth_"), names_to = "Depth", values_to = "Value") %>%
+        mutate(Depth = as.numeric(gsub("Depth_", "", Depth)))
+      
+      # Interpolate to every 0.1 meter
+      depth_seq <- seq(0, max(data_long$Depth), by = 0.1)
+      data_interpolated <- data_long %>%
+        group_by(datetime) %>%
+        summarise(Value = list(approx(Depth, Value, xout = depth_seq, rule = 2)$y),
+                  Depth = list(depth_seq)) %>%
+        unnest(c(Depth, Value))
+      
+      # Join with bathymetry data and calculate mass in kg
+      data_interpolated <- data_interpolated %>%
+        left_join(bathy_data_int, by = "Depth") %>%
+        mutate(kg = Value * Area * 0.1 / 1000)
+      
+      # Summarize total mass per datetime
+      data_interpolated_avg <- data_interpolated %>%
+        group_by(datetime) %>%
+        summarise(sum_kg = sum(kg, na.rm = TRUE))
+      
+      data_interpolated_avg %>%
+        mutate(Model = model) 
+    } else {
+      tibble()  
+    }
+  })
+}
+
+
+
+
+NH4_sum <- cal_sum(ext_all[["NH4_gramsPerCubicMeter"]], "NH4", bathy_data_int)
+NO3_sum <- cal_sum(ext_all[["NO3_gramsPerCubicMeter"]], "NO3", bathy_data_int)
+TN_sum <- cal_sum(ext_all[["TN_gramsPerCubicMeter"]], "TN", bathy_data_int)
+DON_sum <- cal_sum(ext_all[["DON_gramsPerCubicMeter"]], "DON", bathy_data_int)
+PON_sum <- cal_sum(ext_all[["PON_gramsPerCubicMeter"]], "PON", bathy_data_int)
+
+Nitrif_sum <- cal_sum(ext_all[["Nitrif_gramsPerCubicMeterPerDay"]], "Nitrif", bathy_data_int)
+
+Nitrif_sum <- bind_rows(Nitrif_sum, selma_nitrif_final)
+
+Denitrif_sum <- cal_sum(ext_all[["Denitrif_gramsPerCubicMeterPerDay"]], "Denitrif", bathy_data_int)
+
+
+NH4_sum_plot <-   ggplot(NH4_sum, aes(x = datetime, y = sum_kg, color = Model)) +
+    geom_line() +
+    labs(title = "NH4_kg", x = "Date", y = "NH4 (kg)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+NO3_sum_plot <-   ggplot(NO3_sum, aes(x = datetime, y = sum_kg, color = Model)) +
+    geom_line() +
+    labs(title = "NO3_kg", x = "Date", y = "NO3 (kg)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+TN_sum_plot <-   ggplot(TN_sum, aes(x = datetime, y = sum_kg, color = Model)) +
+    geom_line() +
+    labs(title = "TN_kg", x = "Date", y = "TN (kg)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+Denitrif_sum_plot <-   ggplot(Denitrif_sum, aes(x = datetime, y = sum_kg, color = Model)) +
+    geom_line() +
+    labs(title = "kgPerDay", x = "Date", y = "Denitrification (kg day-1)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+
+Nitrif_sum_plot <-   ggplot(Nitrif_sum, aes(x = datetime, y = sum_kg, color = Model)) +
+    geom_line() +
+    labs(title = "kgPerDay", x = "Date", y = "Nitrification (kg day-1)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+DON_sum_plot <-   ggplot(DON_sum, aes(x = datetime, y = sum_kg, color = Model)) +
+    geom_line() +
+    labs(title = "kgPerDay", x = "Date", y = "DON (kg)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+PON_sum_plot <-   ggplot(PON_sum, aes(x = datetime, y = sum_kg, color = Model)) +
+    geom_line() +
+    labs(title = "kgrPerDay", x = "Date", y = "PON (kg)") +
+    theme_minimal() +
+    theme(legend.position = "bottom") 
+    
+
+grid.arrange(NH4_sum_plot, NO3_sum_plot, TN_sum_plot, Denitrif_sum_plot, Nitrif_sum_plot, DON_sum_plot, PON_sum_plot, ncol=1, nrow=7)
+
+
+
+
+
+# 
+# 
+#  NH4_sum <- cal_sum(ext_all[["NH4_gramsPerCubicMeter"]], "NH4", bathy_data_int) -->
+# 
+# 
+#      NH4_glm_interpolated$kg <- NH4_glm_interpolated$Value* NH4_glm_interpolated$Area*0.1/1000 -->
+# 
+# 
+#       NH4_glm_interpolated_avg <- NH4_glm_interpolated %>% -->
+#            group_by(datetime)   %>% -->
+#            summarise(sum_kg= sum(kg, na.rm = TRUE)) -->
+# 
+# 
+# 
+# 
+#         
+#         # 
+# 
+# 
+# 
+#         NH4_glm_long <- NH4_glm %>% -->
+#            pivot_longer(cols = starts_with("Depth_"), names_to = "Depth", values_to = "Value") %>% -->
+#            mutate(Depth = as.numeric(gsub("Depth_", "", Depth))) -->
+# 
+#          # Interpolate to every 0.1 meter -->
+#            depth_seq <- seq(0, max(NH4_glm_long$Depth), by = 0.1) -->
+#              NH4_glm_interpolated <- NH4_glm_long %>% -->
+#                group_by(datetime) %>% -->
+#                summarise(Value = list(approx(Depth, Value, xout = depth_seq, rule = 2)$y), -->
+#                                             Depth = list(depth_seq)) %>% -->
+#                unnest(c(Depth, Value)) -->
+# 
+# 
+# 
+# 
+# 
+#              NH4_glm_interpolated<- NH4_glm_interpolated %>% -->
+#                  left_join(bathy_data_int, by = 'Depth') -->
+# 
+#                  NH4_glm_interpolated$kg <- NH4_glm_interpolated$Value* NH4_glm_interpolated$Area*0.1/1000 -->
+# 
+# 
+#                   NH4_glm_interpolated_avg <- NH4_glm_interpolated %>% -->
+#                        group_by(datetime)   %>% -->
+#                        summarise(sum_kg= sum(kg, na.rm = TRUE)) -->
+# 
+# 
+# 
+# 
+# 
+#                     NH4_wet_long <- NH4_wet %>% -->
+#                        pivot_longer(cols = starts_with("Depth_"), names_to = "Depth", values_to = "Value") %>% -->
+#                        mutate(Depth = as.numeric(gsub("Depth_", "", Depth))) -->
+# 
+#                      # Interpolate to every 0.1 meter -->
+#                        depth_seq <- seq(0, max(NH4_wet_long$Depth), by = 0.1) -->
+#                          NH4_wet_interpolated <- NH4_wet_long %>% -->
+#                            group_by(datetime) %>% -->
+#                            summarise(Value = list(approx(Depth, Value, xout = depth_seq, rule = 2)$y), -->
+#                                                         Depth = list(depth_seq)) %>% -->
+#                            unnest(c(Depth, Value)) -->
+# 
+# 
+# 
+#                          NH4_wet_interpolated<- NH4_wet_interpolated %>% -->
+#                              left_join(bathy_data_int, by = 'Depth') -->
+# 
+#                              NH4_wet_interpolated$kg <- NH4_wet_interpolated$Value* NH4_wet_interpolated$Area*0.1/1000 -->
+# 
+# 
+#                               NH4_wet_interpolated_avg <- NH4_wet_interpolated %>% -->
+#                                    group_by(datetime)   %>% -->
+#                                    summarise(sum_kg= sum(kg, na.rm = TRUE)) -->
+# 
+# 
+# 
+# 
+# 
+#                                 NH4_selma_long <- NH4_selma %>% -->
+#                                    pivot_longer(cols = starts_with("Depth_"), names_to = "Depth", values_to = "Value") %>% -->
+#                                    mutate(Depth = as.numeric(gsub("Depth_", "", Depth))) -->
+# 
+#                                  # Interpolate to every 0.1 meter -->
+#                                    depth_seq <- seq(0, max(NH4_selma_long$Depth), by = 0.1) -->
+#                                      NH4_selma_interpolated <- NH4_selma_long %>% -->
+#                                        group_by(datetime) %>% -->
+#                                        summarise(Value = list(approx(Depth, Value, xout = depth_seq, rule = 2)$y), -->
+#                                                                     Depth = list(depth_seq)) %>% -->
+#                                        unnest(c(Depth, Value)) -->
+# 
+# 
+# 
+#                                      NH4_selma_interpolated<- NH4_selma_interpolated %>% -->
+#                                          left_join(bathy_data_int, by = 'Depth') -->
+# 
+#                                          NH4_selma_interpolated$kg <- NH4_selma_interpolated$Value* NH4_selma_interpolated$Area*0.1/1000 -->
+# 
+# 
+#                                           NH4_selma_interpolated_avg <- NH4_selma_interpolated %>% -->
+#                                                group_by(datetime)   %>% -->
+#                                                summarise(sum_kg= sum(kg, na.rm = TRUE)) -->
+# 
+
+
+# NH4_glm_avg <- NH4_glm %>%
+#   mutate(NH4_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "GLM") %>%
+#   select(Model, datetime, NH4_avg)
+# 
+# NH4_wet_avg <- NH4_wet %>%
+#   mutate(NH4_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "WET") %>%
+#   select(Model, datetime, NH4_avg)
+# 
+# NH4_selma_avg <- NH4_selma %>%
+#   mutate(NH4_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "SELMA") %>%
+#   select(Model, datetime, NH4_avg)
+# 
+# NH4_avg<- bind_rows(NH4_glm_avg, NH4_wet_avg, NH4_selma_avg)
+# 
+# 
+# Modeled_NO3 <- ext_all[["NO3_gramsPerCubicMeter"]]
+# 
+# NO3_glm <- Modeled_NO3$GLM
+# 
+# NO3_wet <- Modeled_NO3$WET
+# 
+# NO3_selma <- Modeled_NO3$SELMAPROTBAS
+# 
+# 
+# 
+# NO3_glm_avg <- NO3_glm %>%
+#   mutate(NO3_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "GLM") %>%
+#   select(Model, datetime, NO3_avg)
+# 
+# NO3_wet_avg <- NO3_wet %>%
+#   mutate(NO3_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "WET") %>%
+#   select(Model, datetime, NO3_avg)
+# 
+# NO3_selma_avg <- NO3_selma %>%
+#   mutate(NO3_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "SELMA") %>%
+#   select(Model, datetime, NO3_avg)
+# 
+# NO3_avg<- bind_rows(NO3_glm_avg, NO3_wet_avg, NO3_selma_avg)
+# 
+# 
+# 
+# 
+# Modeled_TN <- ext_all[["TN_gramsPerCubicMeter"]]
+# 
+# TN_glm <- Modeled_TN$GLM
+# 
+# TN_wet <- Modeled_TN$WET
+# 
+# TN_selma <- Modeled_TN$SELMAPROTBAS
+# 
+# 
+# 
+# TN_glm_avg <- TN_glm %>%
+#   mutate(TN_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "GLM") %>%
+#   select(Model, datetime, TN_avg)
+# 
+# TN_wet_avg <- TN_wet %>%
+#   mutate(TN_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "WET") %>%
+#   select(Model, datetime, TN_avg)
+# 
+# TN_selma_avg <- TN_selma %>%
+#   mutate(TN_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "SELMA") %>%
+#   select(Model, datetime, TN_avg)
+# 
+# TN_avg<- bind_rows(TN_glm_avg, TN_wet_avg, TN_selma_avg)
+# 
+# 
+# 
+# 
+# 
+# Modeled_Nitrif <- ext_all[["Nitrif_gramsPerCubicMeterPerDay"]]
+# 
+# Nitrif_glm <- Modeled_Nitrif$GLM
+# 
+# Nitrif_wet <- Modeled_Nitrif$WET
+# 
+# #Nitrif_selma <- Modeled_Nitrif$SELMAPROTBAS
+# 
+# 
+# 
+# Nitrif_glm_avg <- Nitrif_glm %>%
+#   mutate(Nitrif_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "GLM") %>%
+#   select(Model, datetime, Nitrif_avg)
+# 
+# Nitrif_wet_avg <- Nitrif_wet %>%
+#   mutate(Nitrif_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "WET") %>%
+#   select(Model, datetime, Nitrif_avg)
+# 
+# #Nitrif_selma_avg <- Nitrif_selma %>%
+# #  mutate(Nitrif_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+# #  mutate(Model = "SELMA") %>%
+# #  select(Model, datetime, Nitrif_avg)
+# 
+# Nitrif_avg<- bind_rows(Nitrif_glm_avg, Nitrif_wet_avg)
+# 
+# 
+# 
+# 
+# 
+# Modeled_Denitrif <- ext_all[["Denitrif_gramsPerCubicMeterPerDay"]]
+# 
+# Denitrif_glm <- Modeled_Denitrif$GLM
+# 
+# Denitrif_wet <- Modeled_Denitrif$WET
+# 
+# Denitrif_selma <- Modeled_Denitrif$SELMAPROTBAS
+# 
+# 
+# 
+# Denitrif_glm_avg <- Denitrif_glm %>%
+#   mutate(Denitrif_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "GLM") %>%
+#   select(Model, datetime, Denitrif_avg)
+# 
+# Denitrif_wet_avg <- Denitrif_wet %>%
+#   mutate(Denitrif_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "WET") %>%
+#   select(Model, datetime, Denitrif_avg)
+# 
+# Denitrif_selma_avg <- Denitrif_selma %>%
+#   mutate(Denitrif_avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+#   mutate(Model = "SELMA") %>%
+#   select(Model, datetime, Denitrif_avg)
+# 
+# Denitrif_avg<- bind_rows(Denitrif_glm_avg, Denitrif_selma_avg, Denitrif_wet_avg)
+# # 
+# More elegant way
+cal_avg <- function(data, var_name) {
+  models <- c("GLM", "WET", "SELMAPROTBAS")
+  
+  map_dfr(models, function(model) {
+    if (!is.null(data[[model]])) {
+      data[[model]] %>%
+        mutate(avg = rowMeans(select(., -1), na.rm = TRUE)) %>%
+        mutate(Model = model) %>%
+        select(Model, datetime, avg) %>%
+        rename_with(~ paste0(var_name, "_avg"), "avg")
+    }
+  })
+}
+
+
+NH4_avg <- cal_avg(ext_all[["NH4_gramsPerCubicMeter"]], "NH4")
+NO3_avg <- cal_avg(ext_all[["NO3_gramsPerCubicMeter"]], "NO3")
+TN_avg <- cal_avg(ext_all[["TN_gramsPerCubicMeter"]], "TN")
+DON_avg <- cal_avg(ext_all[["DON_gramsPerCubicMeter"]], "DON")
+PON_avg <- cal_avg(ext_all[["PON_gramsPerCubicMeter"]], "PON")
+
+Nitrif_avg <- cal_avg(ext_all[["Nitrif_gramsPerCubicMeterPerDay"]], "Nitrif")
+Denitrif_avg <- cal_avg(ext_all[["Denitrif_gramsPerCubicMeterPerDay"]], "Denitrif")
+
+
+NH4_avg_plot <-   ggplot(NH4_avg, aes(x = datetime, y = NH4_avg, color = Model)) +
+    geom_line() +
+    labs(title = "NH4_gramsPerCubicMeter", x = "Date", y = "NH4 (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+NO3_avg_plot <-   ggplot(NO3_avg, aes(x = datetime, y = NO3_avg, color = Model)) +
+    geom_line() +
+    labs(title = "NO3_gramsPerCubicMeter", x = "Date", y = "NO3 (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+TN_avg_plot <-   ggplot(TN_avg, aes(x = datetime, y = TN_avg, color = Model)) +
+    geom_line() +
+    labs(title = "TN_gramsPerCubicMeter", x = "Date", y = "TN (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+Denitrif_avg_plot <-   ggplot(Denitrif_avg, aes(x = datetime, y = Denitrif_avg, color = Model)) +
+    geom_line() +
+    labs(title = "Denitrif_gramsPerCubicMeterPerDay", x = "Date", y = "Denitrification (gr m-3 day-1)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+
+Nitrif_avg_plot <-   ggplot(Nitrif_avg, aes(x = datetime, y = Nitrif_avg, color = Model)) +
+    geom_line() +
+    labs(title = "Nitrif_gramsPerCubicMeterPerDay", x = "Date", y = "Nitrification (gr m-3 day-1)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+DON_avg_plot <-   ggplot(DON_avg, aes(x = datetime, y = DON_avg, color = Model)) +
+    geom_line() +
+    labs(title = "DONgramsPerCubicMeterPerDay", x = "Date", y = "DON (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+PON_avg_plot <-   ggplot(PON_avg, aes(x = datetime, y = PON_avg, color = Model)) +
+    geom_line() +
+    labs(title = "PONgramsPerCubicMeterPerDay", x = "Date", y = "PON (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom") 
+    
+
+grid.arrange(NH4_avg_plot, NO3_avg_plot, TN_avg_plot, Denitrif_avg_plot, Nitrif_avg_plot, DON_avg_plot, PON_avg_plot, ncol=1)
+
+```
+
+
+
+
+# All P related variables - Water Column Means
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+TP_avg <- cal_avg(ext_all[["TP_gramsPerCubicMeter"]], "TP")
+PO4_avg <- cal_avg(ext_all[["PO4_gramsPerCubicMeter"]], "PO4")
+DOP_avg <- cal_avg(ext_all[["DON_gramsPerCubicMeter"]], "DOP")
+POP_avg <- cal_avg(ext_all[["PON_gramsPerCubicMeter"]], "POP")
+
+
+
+TP_avg_plot <-   ggplot(TP_avg, aes(x = datetime, y = TP_avg, color = Model)) +
+    geom_line() +
+    labs(title = "TP_gramsPerCubicMeter", x = "Date", y = "TP (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+
+
+
+PO4_avg_plot <-   ggplot(PO4_avg, aes(x = datetime, y = PO4_avg, color = Model)) +
+    geom_line() +
+    labs(title = "PO4_gramsPerCubicMeter", x = "Date", y = "PO4 (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+
+
+
+DOP_avg_plot <-   ggplot(DOP_avg, aes(x = datetime, y = DOP_avg, color = Model)) +
+    geom_line() +
+    labs(title = "DOP_gramsPerCubicMeter", x = "Date", y = "DOP (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+POP_avg_plot <-   ggplot(POP_avg, aes(x = datetime, y = POP_avg, color = Model)) +
+    geom_line() +
+    labs(title = "POP_gramsPerCubicMeter", x = "Date", y = "POP (gr m-3)") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+grid.arrange(TP_avg_plot, PO4_avg_plot, DOP_avg_plot, POP_avg_plot, ncol=1)
+
+```
+
+# Silica
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+
+
+Modeled_Silica <- ext_all[["Silica_gramsPerCubicMeter"]]
+
+Silica_glm <- Modeled_Silica$GLM
+
+Silica_wet <- Modeled_Silica$WET
+
+Silica_selma <- Modeled_Silica$SELMAPROTBAS
+
+Silica_obs <- Obs_list$Silica_gramsPerCubicMeter
+
+
+depths <- c(0, 4, 10, 20)
+
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot(Silica_glm, Silica_wet, Silica_selma, Silica_obs, depth, "Silica")
+})
+
+Silica_combined_plot <- wrap_plots(list(plots[[1]][[1]],
+                                     plots[[2]][[1]],
+                                     plots[[3]][[1]],
+                                     plots[[4]][[1]]),
+                                ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Silica_combined_plot
+
+```
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+stats_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    Model = rep(c("GLM", "WET", "SELMAPROTBAS"), each = 6),
+    Metric = rep(c("NSE", "RMSE", "NRMSE", "PBIAS", "lnlikelihood", "KGE"), times = 3),
+    Value = c(glm_stats$NSE, glm_stats$RMSE, glm_stats$NRMSE, glm_stats$PBIAS, glm_stats$lnlikelihood, glm_stats$KGE,
+              wet_stats$NSE, wet_stats$RMSE, wet_stats$NRMSE, wet_stats$PBIAS, wet_stats$lnlikelihood, wet_stats$KGE,
+              selma_stats$NSE, selma_stats$RMSE, selma_stats$NRMSE, selma_stats$PBIAS, selma_stats$lnlikelihood, selma_stats$KGE)
+  )
+}))
+
+
+
+ggplot(stats_models, aes(x = Depth * -1, y = Value, color = Model)) +
+
+ geom_line(aes(group = Model)) +
+
+   geom_point(aes(color = Model), size = 2) +
+
+  facet_wrap(~Metric, scales = "free") +
+
+
+  #scale_y_continuous(position = "right") +
+
+  theme_minimal() +
+  labs(
+    x = "Value",
+    y = "Depth",
+    title = "Silica Statistics"
+  )+
+ coord_flip()
+
+
+
+residual_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    GLM = glm_stats$residual,
+    WET = wet_stats$residual,
+    SELMAPROTBAS = selma_stats$residual
+  )
+}))
+
+residual_models_long <- gather(residual_models, Model, Value, GLM:SELMAPROTBAS, factor_key=TRUE)
+
+ggplot(residual_models_long, aes(x=Value, fill=Model)) +
+  facet_wrap(~Depth, scales = "free")+
+  ggtitle("Silica")+
+
+  geom_density(alpha= 0.4) +
+  
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1)
+  
+
+
+
+residual_models_long$Depth <- as.factor(residual_models_long$Depth)
+
+ggplot(residual_models_long, aes(x = Value, y = Depth, col = Model)) +
+  facet_wrap(~Model) +
+geom_density_ridges(linetype = 1, lwd = 0.5, alpha = 0.5) + 
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1) + 
+  ggtitle("Silica") 
+
+
+
+```
+
+# Chla
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+
+Modeled_Chla <- ext_all[["Total_Chla_miligramsPerCubicMeter"]]
+
+Chla_glm <- Modeled_Chla$GLM
+
+Chla_wet <- Modeled_Chla$WET
+
+Chla_selma <- Modeled_Chla$SELMAPROTBAS
+
+Chla_obs <- Obs_list$Total_Chla_miligramsPerCubicMeter
+
+
+depths <- c(1, 5, 8,13)
+
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot(Chla_glm, Chla_wet, Chla_selma, Chla_obs, depth, "Chla")
+})
+
+Chla_combined_plot <- wrap_plots(list(plots[[1]][[1]],
+                                     plots[[2]][[1]],
+                                     plots[[3]][[1]],
+                                     plots[[4]][[1]]),
+                                ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Chla_combined_plot
+
+```
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =6, fig.height=6}
+
+
+stats_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    Model = rep(c("GLM", "WET", "SELMAPROTBAS"), each = 6),
+    Metric = rep(c("NSE", "RMSE", "NRMSE", "PBIAS", "lnlikelihood", "KGE"), times = 3),
+    Value = c(glm_stats$NSE, glm_stats$RMSE, glm_stats$NRMSE, glm_stats$PBIAS, glm_stats$lnlikelihood, glm_stats$KGE,
+              wet_stats$NSE, wet_stats$RMSE, wet_stats$NRMSE, wet_stats$PBIAS, wet_stats$lnlikelihood, wet_stats$KGE,
+              selma_stats$NSE, selma_stats$RMSE, selma_stats$NRMSE, selma_stats$PBIAS, selma_stats$lnlikelihood, selma_stats$KGE)
+  )
+}))
+
+
+
+ggplot(stats_models, aes(x = Depth * -1, y = Value, color = Model)) +
+
+ geom_line(aes(group = Model)) +
+
+   geom_point(aes(color = Model), size = 2) +
+
+  facet_wrap(~Metric, scales = "free") +
+
+
+  #scale_y_continuous(position = "right") +
+
+  theme_minimal() +
+  labs(
+    x = "Value",
+    y = "Depth",
+    title = "Chla Statistics"
+  )+
+ coord_flip()
+
+
+
+residual_models <- do.call(rbind, lapply(seq_along(depths), function(i) {
+  depth <- depths[i]
+  stats <- plots[[i]]
+  
+  glm_stats <- stats[[2]]
+  wet_stats <- stats[[3]]
+  selma_stats <- stats[[4]]
+  
+  # Create a dataframe for this depth
+  data.frame(
+    Depth = depth,
+    GLM = glm_stats$residual,
+    WET = wet_stats$residual,
+    SELMAPROTBAS = selma_stats$residual
+  )
+}))
+
+residual_models_long <- gather(residual_models, Model, Value, GLM:SELMAPROTBAS, factor_key=TRUE)
+
+ggplot(residual_models_long, aes(x=Value, fill=Model)) +
+  facet_wrap(~Depth, scales = "free")+
+  ggtitle("Chla")+
+
+  geom_density(alpha= 0.4) +
+  
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1)
+  
+
+
+
+residual_models_long$Depth <- as.factor(residual_models_long$Depth)
+
+ggplot(residual_models_long, aes(x = Value, y = Depth, col = Model)) +
+  facet_wrap(~Model) +
+geom_density_ridges(linetype = 1, lwd = 0.5, alpha = 0.5) + 
+     geom_vline(xintercept = 0, 
+             color = "red", linetype = "dashed", size = 1) + 
+  ggtitle("Chla") 
+
+
+
+
+```
+
+### EPILIMNION THICKNESS
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$Surface_Mixed_Layer_Depth_meter$GLM %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Surface_Mixed_Layer_Depth_meter$WET %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Surface_Mixed_Layer_Depth_meter$SELMAPROTBAS %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+combined_data$datetime <- as.POSIXct(combined_data$datetime)
+
+
+combined_data$datetime <- with_tz(combined_data$datetime, tzone = "GMT") 
+
+# Plot the combined data
+ggplot(combined_data, aes(x = datetime, y = epi_thickness, color = Model, group = Model)) +
+  geom_line() +  # Use lines for different models
+  labs(title = "Surface Mixed Layer Depth", 
+       x = "Date", 
+       y = "Epilimnion Thickness (m)") +
+  theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+### SURFACE-BOTTOM DIFFERENCE
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$Bottom_Surface_Difference_degC$GLM %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Bottom_Surface_Difference_degC$WET %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Bottom_Surface_Difference_degC$SELMAPROTBAS %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+combined_data$datetime <- as.POSIXct(combined_data$datetime)
+
+
+combined_data$datetime <- with_tz(combined_data$datetime, tzone = "GMT") 
+
+# Plot the combined data
+ggplot(combined_data, aes(x = datetime, y = temp_diff, color = Model, group = Model)) +
+  geom_line() +  # Use lines for different models
+  labs(title = "Surface-bottom temperature difference", 
+       x = "Date", 
+       y = "Surface-bottom difference (m)") +
+  theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+### Starting Date of the Stratification
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$Duration_of_Stratification$GLM %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Duration_of_Stratification$WET %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Duration_of_Stratification$SELMAPROTBAS %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+combined_data$Strat_Start_Date<- ymd(combined_data$Strat_Start_Date)
+
+combined_data$Mixing_Start_Date <- as.Date(combined_data$Mixing_Start_Date) 
+
+
+combined_data$day_of_year <- yday(combined_data$Strat_Start_Date)
+
+ggplot(combined_data, aes(x = Year, y = day_of_year, color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "Stratification Starting Date", 
+         x = "Year", 
+         y = "Stratification Start (Day of Year)") +
+    scale_y_continuous(breaks = c(75,91, 105, 120, 135), labels = c("Mar 15", "Apr 1", "Apr 15", "Apr 30", "May 15"))+
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+### Starting Date of the Mixing
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+combined_data$day_of_year <- yday(combined_data$Mixing_Start_Date)
+
+ggplot(combined_data, aes(x = Year, y = day_of_year, color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "Mixing Starting Date", 
+         x = "Year", 
+         y = "Mixing Start (Day of Year)") +
+    scale_y_continuous(breaks = c(274,288, 305, 319, 335), labels = c("Oct 1", "Oct 15", "Nov 1", "Nov 15", "Dec 1"))+
+theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+### Duration of Stratification
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+
+ggplot(combined_data, aes(x = Year, y = Consecutive_Strat_Days, color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "Consecutive Stratified Days", 
+         x = "Year", 
+         y = "Consecutive Stratified Days") +
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+
+### Metalimnion thickness
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+
+GLM_data <- ext_all$Metalimnion_Thickness_meter$GLM %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Metalimnion_Thickness_meter$WET %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Metalimnion_Thickness_meter$SELMAPROTBAS %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+
+ggplot(combined_data, aes(x = datetime, y = meta_thickness, color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "Metalimnion thickness", 
+         x = "datetime", 
+         y = "Metalimnion thickness") +
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+
+
+### Ice Duration Period
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$Ice_Thickness_meter$GLM$ice_duration_period %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Ice_Thickness_meter$WET$ice_duration_period %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Ice_Thickness_meter$SELMAPROTBAS$ice_duration_period %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+
+ggplot(combined_data, aes(x = unique_years, y = ice_duration_day, color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "Ice Duration Period", 
+         x = "Years", 
+         y = "Ice Duration (day") +
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+### Ice Thickness
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$Ice_Thickness_meter$GLM$ice_thickness %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Ice_Thickness_meter$WET$ice_thickness %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Ice_Thickness_meter$SELMAPROTBAS$ice_thickness %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+
+ggplot(combined_data, aes(x = datetime, y = ice_thickness, color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "Ice Thickness", 
+         x = "Years", 
+         y = "Ice Thickness (meter)") +
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+
+### DO exceedance curve - depth = 0
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$DO_Temporal_Variability$GLM %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$DO_Temporal_Variability$WET %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$DO_Temporal_Variability$SELMAPROTBAS %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+ggplot(combined_data, aes(x = exceedance, y = DO , color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "DO Exceedance Curve", 
+         x = "Exceedance", 
+         y = "Dissolved Oxygen (mg L-1)") +
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+### Anoxic Factor
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$Number_Of_Anoxic_Day$GLM$AF_yearly %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Number_Of_Anoxic_Day$WET$AF_yearly %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Number_Of_Anoxic_Day$SELMAPROTBAS$AF_yearly %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+ggplot(combined_data, aes(x = Years, y = AF_total , color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "Anoxic Factor", 
+         x = "Years", 
+         y = "Anoxic Factor") +
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+
+### Number of Anoxic Days
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$Number_Of_Anoxic_Day$GLM$num_anoxic_days %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Number_Of_Anoxic_Day$WET$num_anoxic_days %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Number_Of_Anoxic_Day$SELMAPROTBAS$num_anoxic_days %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+ggplot(combined_data, aes(x = Years, y = num_anoxic_days , color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "Number of Anoxic Days", 
+         x = "Years", 
+         y = "Number of Anoxic Days") +
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+### The Depth Anoxia Starts
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=4}
+
+GLM_data <- ext_all$Number_Of_Anoxic_Day$GLM$anoxic_depths %>%
+  mutate(Model = "GLM")
+
+WET_data <- ext_all$Number_Of_Anoxic_Day$WET$anoxic_depths %>%
+  mutate(Model = "WET")
+
+Selma_data <- ext_all$Number_Of_Anoxic_Day$SELMAPROTBAS$anoxic_depths %>%
+  mutate(Model = "SELMAPROTBAS")
+
+
+combined_data <- bind_rows(GLM_data, WET_data, Selma_data)
+
+
+ggplot(combined_data, aes(x = oxy_data.datetime, y = (anoxic_depths)*-1 , color = Model, group = Model)) +
+    geom_line() +  # Use lines for different models
+    labs(title = "The depth anoxia starts", 
+         x = "datetime", 
+         y = "The depth anoxia starts") +
+    theme(legend.title = element_blank(), legend.position = "bottom")
+
+```
+
+
+
+## TP_TN ratio
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$TN_TP_ratio$GLM
+
+WET_data <- ext_all$TN_TP_ratio$WET
+
+SELMA_data <- ext_all$TN_TP_ratio$SELMAPROTBAS
+
+
+
+compare_plot_model<- function(temp_glm, temp_wet, temp_selma, depth, y_title) {
+  
+  # Initialize an empty list to hold available data
+  data_list <- list()
+  
+  # Check and add GLM data if available and contains the specified depth column
+  if (!is.null(temp_glm) && paste0("Depth_", depth) %in% names(temp_glm)) {
+    GLM_data <- temp_glm %>%
+      select(datetime, !!sym(paste0("Depth_", depth))) %>%
+      rename(Depth = !!sym(paste0("Depth_", depth))) %>%
+      mutate(Model = "GLM")
+    data_list <- append(data_list, list(GLM_data))
+  }
+  
+  # Check and add WET data if available and contains the specified depth column
+  if (!is.null(temp_wet) && paste0("Depth_", depth) %in% names(temp_wet)) {
+    WET_data <- temp_wet %>%
+      select(datetime, !!sym(paste0("Depth_", depth))) %>%
+      rename(Depth = !!sym(paste0("Depth_", depth))) %>%
+      mutate(Model = "WET")
+    data_list <- append(data_list, list(WET_data))
+  }
+  
+  # Check and add SELMA data if available and contains the specified depth column
+  if (!is.null(temp_selma) && paste0("Depth_", depth) %in% names(temp_selma)) {
+    Selma_data <- temp_selma %>%
+      select(datetime, !!sym(paste0("Depth_", depth))) %>%
+      rename(Depth = !!sym(paste0("Depth_", depth))) %>%
+      mutate(Model = "SELMAPROTBAS")
+    data_list <- append(data_list, list(Selma_data))
+  }
+  
+  # Combine all available data
+  if (length(data_list) > 0) {
+    Temp_all <- bind_rows(data_list)
+  } else {
+    stop("No data available for the specified depth in any model.")
+  }
+  
+  # Create plot
+  temp_plot <- ggplot(Temp_all, aes(x = datetime, y = Depth, color = Model, group = Model)) + 
+    geom_line(aes(linetype = Model)) +  # Line plot for available models
+    labs(title = paste0("Depth: ", depth, " m"), 
+         x = "Date", 
+         y = y_title) +
+    theme(legend.title = element_blank())
+  
+  return(temp_plot)
+}
+
+
+
+
+depths <- c(0, 5, 10, 20)
+
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "TN_TP_ratio")
+})
+
+# Combine all plots into one layout and collect the legends
+TN_TP_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+TN_TP_combined_plot
+
+
+
+```
+
+
+
+
+## Chla_TP ratio
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Chla_TP_ratio$GLM
+
+WET_data <- ext_all$Chla_TP_ratio$WET
+
+SELMA_data <- ext_all$Chla_TP_ratio$SELMAPROTBAS
+
+
+
+
+
+depths <- c(0, 5, 10, 20)
+
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Chla_TP_ratio")
+})
+
+# Combine all plots into one layout and collect the legends
+Chla_TP_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Chla_TP_combined_plot
+
+
+
+```
+
+
+
+
+
+## TP
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$TP_gramsPerCubicMeter$GLM
+
+WET_data <- ext_all$TP_gramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$TP_gramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "TP_gramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+TP_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+TP_combined_plot
+
+
+
+```
+
+
+## TN
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$TN_gramsPerCubicMeter$GLM
+
+WET_data <- ext_all$TN_gramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$TN_gramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "TN_gramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+TN_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+TN_combined_plot
+
+
+```
+
+
+
+
+## PON_gramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$PON_gramsPerCubicMeter$GLM
+
+WET_data <- ext_all$PON_gramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$PON_gramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "PON_gramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+PON_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+PON_combined_plot
+
+
+```
+
+
+
+
+## DON_gramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$DON_gramsPerCubicMeter$GLM
+
+WET_data <- ext_all$DON_gramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$DON_gramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "DON_gramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+DON_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+DON_combined_plot
+
+
+```
+
+
+
+
+## DOP_gramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$DOP_gramsPerCubicMeter$GLM
+
+WET_data <- ext_all$DOP_gramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$DOP_gramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "DOP_gramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+DOP_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+DOP_combined_plot
+
+
+```
+
+
+
+
+## POP_gramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$POP_gramsPerCubicMeter$GLM
+
+WET_data <- ext_all$POP_gramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$POP_gramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "POP_gramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+POP_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+POP_combined_plot
+
+
+```
+
+
+
+
+## DOC_gramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$DOC_gramsPerCubicMeter$GLM
+
+WET_data <- ext_all$DOC_gramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$DOC_gramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "DOC_gramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+DOC_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+DOC_combined_plot
+
+
+```
+
+
+
+## POC_gramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$POC_gramsPerCubicMeter$GLM
+
+WET_data <- ext_all$POC_gramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$POC_gramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "POC_gramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+POC_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+POC_combined_plot
+
+
+```
+
+
+
+
+
+## Cyano_Chla_miligramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Cyano_Chla_miligramsPerCubicMeter$GLM
+
+WET_data <- ext_all$Cyano_Chla_miligramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$Cyano_Chla_miligramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Cyano_Chla_miligramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+Cyano_Chla_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Cyano_Chla_combined_plot
+
+
+```
+
+
+## Diatom_Chla_miligramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Diatom_Chla_miligramsPerCubicMeter$GLM
+
+WET_data <- ext_all$Diatom_Chla_miligramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$Diatom_Chla_miligramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Diatom_Chla_miligramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+Diatom_Chla_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Diatom_Chla_combined_plot
+
+
+```
+
+
+
+## Diatom_C_miligramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Diatom_C_miligramsPerCubicMeter$GLM
+
+WET_data <- ext_all$Diatom_C_miligramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$Diatom_C_miligramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Diatom_C_miligramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+Diatom_C_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Diatom_C_combined_plot
+
+
+```
+
+
+
+
+## Cyano_C_miligramsPerCubicMeter
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Cyano_C_miligramsPerCubicMeter$GLM
+
+WET_data <- ext_all$Cyano_C_miligramsPerCubicMeter$WET
+
+SELMA_data <- ext_all$Cyano_C_miligramsPerCubicMeter$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Cyano_C_miligramsPerCubicMeter")
+})
+
+# Combine all plots into one layout and collect the legends
+Cyano_C_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Cyano_C_combined_plot
+
+
+```
+
+
+
+## Photosynthetic DO production
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Photosynthetic_DO_Production_mgPerL$GLM
+
+WET_data <- ext_all$Photosynthetic_DO_Production_mgPerL$WET
+
+SELMA_data <- ext_all$Photosynthetic_DO_Production_mgPerL$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Photosynthetic_DO_Production_mgPerL")
+})
+
+# Combine all plots into one layout and collect the legends
+Photosynthesis_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Photosynthesis_combined_plot
+
+
+```
+
+
+## Diatom_Resp_C_miligramsPerCubicMeterPerDay
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Diatom_Resp_C_miligramsPerCubicMeterPerDay$GLM
+
+WET_data <- ext_all$Diatom_Resp_C_miligramsPerCubicMeterPerDay$WET
+
+SELMA_data <- ext_all$Diatom_Resp_C_miligramsPerCubicMeterPerDay$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Diatom_Resp_C_miligramsPerCubicMeterPerDay")
+})
+
+# Combine all plots into one layout and collect the legends
+Diatom_resp_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Diatom_resp_combined_plot
+
+
+```
+
+
+
+
+## Green_Resp_C_miligramsPerCubicMeterPerDay
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Green_Resp_C_miligramsPerCubicMeterPerDay$GLM
+
+WET_data <- ext_all$Green_Resp_C_miligramsPerCubicMeterPerDay$WET
+
+SELMA_data <- ext_all$Green_Resp_C_miligramsPerCubicMeterPerDay$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Green_Resp_C_miligramsPerCubicMeterPerDay")
+})
+
+# Combine all plots into one layout and collect the legends
+Green_resp_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Green_resp_combined_plot
+
+
+```
+
+
+
+
+## Cyano_Resp_C_miligramsPerCubicMeterPerDay
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+GLM_data <- ext_all$Cyano_Respiration_C_miligramsPerCubicMeterPerDay$GLM
+
+WET_data <- ext_all$Cyano_Respiration_C_miligramsPerCubicMeterPerDay$WET
+
+SELMA_data <- ext_all$Cyano_Respiration_C_miligramsPerCubicMeterPerDay$SELMAPROTBAS
+
+
+depths <- c(0, 5, 10, 20)
+
+# Create and store plots for each depth
+plots <- lapply(depths, function(depth) {
+  compare_plot_model(GLM_data, WET_data, SELMA_data, depth, "Cyano_Respiration_C_miligramsPerCubicMeterPerDay")
+})
+
+# Combine all plots into one layout and collect the legends
+Cyano_resp_combined_plot <- wrap_plots(plots, ncol = 1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom")
+
+# Display combined plot
+Cyano_resp_combined_plot
+
+
+```
+
+
+
+
+
+```{r, echo=FALSE, warning=FALSE, message= FALSE, fig.width =9, fig.height=16}
+
+
+# 
+#  
+# # Extract Temperature
+# 
+# temp_glm <- Modeled_temp$GLM
+# 
+# temp_wet <- Modeled_temp$WET
+# 
+# temp_selma <- Modeled_temp$SELMAPROTBAS
+# 
+# temp_obs <- Obs_list$Temp_degreeCelcius
+# 
+# # For Depth = 0
+# 
+# GLM_0 <- temp_glm %>%
+#   select(datetime, Depth_0) %>%
+#   mutate(Model = "GLM")
+# 
+# WET_0 <- temp_wet %>%
+#   select(datetime, Depth_0)%>%
+#   mutate(Model = "WET")
+# 
+# Selma_0 <- temp_selma %>%
+#   select(datetime, Depth_0)%>%
+#   mutate(Model = "SELMAPROTBAS")
+#   
+# Obs_0 <- temp_obs  %>%
+#   select(datetime, Depth_0)%>%
+#   mutate(Model = "OBSERVED")
+# 
+# 
+# Temp_0_all <- bind_rows(GLM_0,
+#                       WET_0,
+#                       Selma_0,
+#                       Obs_0)
+# 
+# 
+# temp0_gg<- ggplot(Temp_0_all, aes(x = datetime, y = Depth_0, color = Model, group = Model)) + 
+#   geom_line(data = Temp_0_all[Temp_0_all$Model != "OBSERVED",], aes(linetype = Model)) +  # Line plot for GLM, WET, and SELMA
+#   geom_point(data = Temp_0_all[Temp_0_all$Model == "OBSERVED",], aes(shape = Model), col="black") +  # Points for observed data
+#   labs(title = "Surface", 
+#        x = "Date", 
+#        y = "Temperature") +
+#   theme_minimal() +
+#   theme(legend.title = element_blank(), legend.position='none')
+# 
+# 
+# 
+# 
+# # For Depth = 5
+# 
+# GLM_5 <- temp_glm %>%
+#   select(datetime, Depth_5) %>%
+#   mutate(Model = "GLM")
+# 
+# WET_5 <- temp_wet %>%
+#   select(datetime, Depth_5)%>%
+#   mutate(Model = "WET")
+# 
+# Selma_5 <- temp_selma %>%
+#   select(datetime, Depth_5)%>%
+#   mutate(Model = "SELMAPROTBAS")
+#   
+# Obs_5 <- temp_obs  %>%
+#   select(datetime, Depth_5)%>%
+#   mutate(Model = "OBSERVED")
+# 
+# 
+# Temp_5_all <- bind_rows(GLM_5,
+#                       WET_5,
+#                       Selma_5,
+#                       Obs_5)
+# 
+# 
+# temp5_gg<- ggplot(Temp_5_all, aes(x = datetime, y = Depth_5, color = Model, group = Model)) + 
+#   geom_line(data = Temp_5_all[Temp_5_all$Model != "OBSERVED",], aes(linetype = Model)) +  # Line plot for GLM, WET, and SELMA
+#   geom_point(data = Temp_5_all[Temp_5_all$Model == "OBSERVED",], aes(shape = Model), col="black") +  # Points for observed data
+#   labs(title = "Depth: 5 m", 
+#        x = "Date", 
+#        y = "Temperature") +
+#   theme_minimal() +
+#   theme(legend.title = element_blank(), legend.position='none')
+# 
+# 
+# 
+# 
+# # For Depth = 10
+# 
+# GLM_10 <- temp_glm %>%
+#   select(datetime, Depth_10) %>%
+#   mutate(Model = "GLM")
+# 
+# WET_10 <- temp_wet %>%
+#   select(datetime, Depth_10)%>%
+#   mutate(Model = "WET")
+# 
+# Selma_10 <- temp_selma %>%
+#   select(datetime, Depth_10)%>%
+#   mutate(Model = "SELMAPROTBAS")
+#   
+# Obs_10 <- temp_obs  %>%
+#   select(datetime, Depth_10)%>%
+#   mutate(Model = "OBSERVED")
+# 
+# 
+# Temp_10_all <- bind_rows(GLM_10,
+#                       WET_10,
+#                       Selma_10,
+#                       Obs_10)
+# 
+# 
+# temp10_gg<- ggplot(Temp_10_all, aes(x = datetime, y = Depth_10, color = Model, group = Model)) + 
+#   geom_line(data = Temp_10_all[Temp_10_all$Model != "OBSERVED",], aes(linetype = Model)) +  # Line plot for GLM, WET, and SELMA
+#   geom_point(data = Temp_10_all[Temp_10_all$Model == "OBSERVED",], aes(shape = Model), col="black") +  # Points for observed data
+#   labs(title = "Depth: 10 m", 
+#        x = "Date", 
+#        y = "Temperature") +
+#   theme_minimal() +
+#   theme(legend.title = element_blank(), legend.position='none')
+# 
+# 
+# 
+# 
+# # For Depth = 15
+# 
+# GLM_15 <- temp_glm %>%
+#   select(datetime, Depth_15) %>%
+#   mutate(Model = "GLM")
+# 
+# WET_15 <- temp_wet %>%
+#   select(datetime, Depth_15)%>%
+#   mutate(Model = "WET")
+# 
+# Selma_15 <- temp_selma %>%
+#   select(datetime, Depth_15)%>%
+#   mutate(Model = "SELMAPROTBAS")
+#   
+# Obs_15 <- temp_obs  %>%
+#   select(datetime, Depth_15)%>%
+#   mutate(Model = "OBSERVED")
+# 
+# 
+# Temp_15_all <- bind_rows(GLM_15,
+#                       WET_15,
+#                       Selma_15,
+#                       Obs_15)
+# 
+# 
+# temp15_gg<- ggplot(Temp_15_all, aes(x = datetime, y = Depth_15, color = Model, group = Model)) + 
+#   geom_line(data = Temp_15_all[Temp_15_all$Model != "OBSERVED",], aes(linetype = Model)) +  # Line plot for GLM, WET, and SELMA
+#   geom_point(data = Temp_15_all[Temp_15_all$Model == "OBSERVED",], aes(shape = Model), col="black") +  # Points for observed data
+#   labs(title = "Depth: 15 m", 
+#        x = "Date", 
+#        y = "Temperature") +
+#   theme_minimal() +
+#   theme(legend.title = element_blank(), legend.position='none')
+# 
+# 
+# 
+# 
+# # For Depth = 20
+# 
+# GLM_20 <- temp_glm %>%
+#   select(datetime, Depth_20) %>%
+#   mutate(Model = "GLM")
+# 
+# WET_20 <- temp_wet %>%
+#   select(datetime, Depth_20)%>%
+#   mutate(Model = "WET")
+# 
+# Selma_20 <- temp_selma %>%
+#   select(datetime, Depth_20)%>%
+#   mutate(Model = "SELMAPROTBAS")
+#   
+# Obs_20 <- temp_obs  %>%
+#   select(datetime, Depth_20)%>%
+#   mutate(Model = "OBSERVED")
+# 
+# 
+# Temp_20_all <- bind_rows(GLM_20,
+#                       WET_20,
+#                       Selma_20,
+#                       Obs_20)
+# 
+# 
+# temp20_gg<- ggplot(Temp_20_all, aes(x = datetime, y = Depth_20, color = Model, group = Model)) + 
+#   geom_line(data = Temp_20_all[Temp_20_all$Model != "OBSERVED",], aes(linetype = Model)) +  # Line plot for GLM, WET, and SELMA
+#   geom_point(data = Temp_20_all[Temp_20_all$Model == "OBSERVED",], aes(shape = Model), col="black") +  # Points for observed data
+#   labs(title = "Depth: 20 m", 
+#        x = "Date", 
+#        y = "Temperature") +
+#   theme_minimal() +
+#   theme(legend.title = element_blank(), legend.position='none')
+# 
+# 
+# 
+# 
+# 
+# # For Depth = 24
+# 
+# GLM_24 <- temp_glm %>%
+#   select(datetime, Depth_24) %>%
+#   mutate(Model = "GLM")
+# 
+# WET_24 <- temp_wet %>%
+#   select(datetime, Depth_24)%>%
+#   mutate(Model = "WET")
+# 
+# Selma_24 <- temp_selma %>%
+#   select(datetime, Depth_24)%>%
+#   mutate(Model = "SELMAPROTBAS")
+#   
+# Obs_24 <- temp_obs  %>%
+#   select(datetime, Depth_24)%>%
+#   mutate(Model = "OBSERVED")
+# 
+# 
+# Temp_24_all <- bind_rows(GLM_24,
+#                       WET_24,
+#                       Selma_24,
+#                       Obs_24)
+# 
+# 
+# temp24_gg<- ggplot(Temp_24_all, aes(x = datetime, y = Depth_24, color = Model, group = Model)) + 
+#   geom_line(data = Temp_24_all[Temp_24_all$Model != "OBSERVED",], aes(linetype = Model)) +  # Line plot for GLM, WET, and SELMA
+#   geom_point(data = Temp_24_all[Temp_24_all$Model == "OBSERVED",], aes(shape = Model), col="black") +  # Points for observed data
+#   labs(title = "Depth: 24 m", 
+#        x = "Date", 
+#        y = "Temperature") +
+#   theme_minimal() +
+#   theme(legend.title = element_blank(), legend.position="bottom")
+# 
+# 
+# temp0_gg / temp5_gg / temp10_gg / temp15_gg / temp20_gg / temp24_gg
+# 
+#   
+# # Extrat DO 
+# DO_glm <- Modeled_do$GLM
+# DO_wet <- Modeled_do$WET
+# DO_selma <- Modeled_do$SELMAPROTBAS
+# 
+
+
+```
